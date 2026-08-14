@@ -14,7 +14,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
-source "$HERE/lib/common.sh"
+source "$HERE/common.sh"
 
 HOSTNAME=""
 PORT="8317"

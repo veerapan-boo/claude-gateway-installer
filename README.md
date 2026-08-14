@@ -15,6 +15,12 @@ cd claude-gateway-installer
 bash install.sh
 ```
 
+The repo contains a **single entry point** — `install.sh`. Everything else
+lives in `lib/`. Once you pick an install directory, the installer copies the
+small management scripts (`gateway.sh`, `claude-login.sh`, `lib/common.sh`)
+into that directory, so **all day-2 management happens from the install
+directory** (default `~/claude-gateway`), never from this repo.
+
 ## How the pieces work together
 
 ```mermaid
@@ -116,16 +122,50 @@ The keys were printed at the end of the installer and saved in
 
 ## Day-2 commands
 
+All commands below run **from the install directory** (default
+`~/claude-gateway`), where the installer copied the management scripts:
+
 ```bash
-./gateway.sh list          # list all installed gateways (port, running, keys, oauth)
-./gateway.sh status        # is it running?
-./gateway.sh logs tail     # follow the logs (journalctl on Linux)
-./gateway.sh restart
-./gateway.sh uninstall     # stop + remove this instance's service, optionally delete
-                           # its dir, and offer to drop its hostname from the tunnel
-./gateway.sh uninstall <dir>   # uninstall a specific instance by path
-./claude-login.sh          # re-login when the OAuth token expires (~60–90 days)
+~/claude-gateway/gateway.sh list          # list all installed gateways (port, running, keys, oauth)
+~/claude-gateway/gateway.sh status        # is it running?
+~/claude-gateway/gateway.sh logs tail     # follow the logs (journalctl on Linux)
+~/claude-gateway/gateway.sh restart
+~/claude-gateway/gateway.sh uninstall     # stop + remove this instance's service, optionally delete
+                                          # its dir, and offer to drop its hostname from the tunnel
+~/claude-gateway/gateway.sh uninstall <dir>   # uninstall a specific instance by path
+~/claude-gateway/claude-login.sh          # re-login when the OAuth token expires (~60–90 days)
 ```
+
+(If you installed elsewhere, replace `~/claude-gateway` with your install dir.)
+
+## Re-login
+
+The Claude OAuth token the gateway uses expires roughly every **60–90 days**.
+You will know when it has: your devices get `401` from the gateway even though
+the gateway itself is running and healthy.
+
+To re-login, on the **gateway machine** run the copied script from the install
+directory:
+
+```bash
+~/claude-gateway/claude-login.sh
+```
+
+It repeats the paste-back flow:
+
+1. Open the printed `https://claude.ai/oauth/authorize?...` URL in any browser
+   and sign in with your Claude subscription account → Authorize.
+2. The browser redirects to a `localhost` URL (page fails to load — expected).
+3. Copy the **FULL** callback URL — it must include both `code` and `state`,
+   e.g. `http://localhost:54545/callback?code=xxxxx&state=yyyyy` — and paste
+   it back into the terminal.
+4. When it says authentication successful, restart the gateway:
+
+```bash
+~/claude-gateway/gateway.sh restart
+```
+
+Then verify on a client device: `claude` should work again.
 
 ## Re-running / notes
 
@@ -142,18 +182,30 @@ The keys were printed at the end of the installer and saved in
   `~/claude-gateway/cliproxyapi/config.yaml`. To revoke a device, remove its
   key from `api-keys:` in `config.yaml` (CLIProxyAPI reloads it automatically).
 - If `claude-gateway.example.com` returns `401`, the gateway is fine — the OAuth
-  token expired. Run `./claude-login.sh` and restart the service.
+  token expired. Follow the [Re-login](#re-login) section above.
 
 ## Files
 
 ```
 claude-gateway-installer/
-├── install.sh              # one-shot interactive installer
-├── claude-login.sh         # Claude OAuth login (CLI paste-back)
-├── setup-tunnel.sh         # Cloudflare Tunnel detection + setup
-├── gateway.sh              # status | start | stop | restart | logs
+├── install.sh              # one-shot interactive installer (the only file you run)
 ├── lib/
-│   ├── common.sh           # shared helpers (OS/arch detection, prompts)
+│   ├── setup-tunnel.sh     # Cloudflare Tunnel detection + setup (run by install.sh)
+│   ├── claude-login.sh     # Claude OAuth login (CLI paste-back) — copied to install dir
+│   ├── gateway.sh          # status | start | stop | restart | logs | uninstall | list — copied to install dir
+│   ├── common.sh           # shared helpers (OS/arch detection, prompts) — copied to install dir
 │   └── install-service.sh  # systemd / LaunchAgent service install
 └── docs/th/installer.md    # Thai version of this README
+```
+
+After an install, your chosen directory contains the working copies you
+actually use:
+
+```
+~/claude-gateway/
+├── gateway.sh              # status | start | stop | restart | logs | uninstall | list
+├── claude-login.sh         # re-login when the OAuth token expires
+├── lib/common.sh           # shared helpers (do not edit)
+├── cliproxyapi/            # gateway binary + config.yaml + auth/ (OAuth token)
+└── secrets/keys.txt        # your per-device API keys
 ```

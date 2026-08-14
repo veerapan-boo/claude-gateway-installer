@@ -338,7 +338,7 @@ say "Step 4/6 — Claude OAuth login (subscription account)"
 if [[ -n "$(ls -A "$CPROXY_DIR/auth" 2>/dev/null)" ]]; then
   ok "OAuth token already present in $CPROXY_DIR/auth — skipping login."
 else
-  bash "$HERE/claude-login.sh" --config "$CONFIG_PATH" || die "Claude login failed."
+  bash "$HERE/lib/claude-login.sh" --config "$CONFIG_PATH" || die "Claude login failed."
 fi
 step
 
@@ -347,7 +347,7 @@ step
 # ---------------------------------------------------------------------------
 say "Step 5/6 — Cloudflare Tunnel"
 HOSTNAME_OUT="$(mktemp)"
-bash "$HERE/setup-tunnel.sh" --hostname "$GATEWAY_HOSTNAME" --port "$PORT" --hostname-out "$HOSTNAME_OUT" || {
+bash "$HERE/lib/setup-tunnel.sh" --hostname "$GATEWAY_HOSTNAME" --port "$PORT" --hostname-out "$HOSTNAME_OUT" || {
   rm -f "$HOSTNAME_OUT"
   die "Tunnel setup failed."
 }
@@ -398,8 +398,8 @@ fi
 
 echo
 step
-if cp "$HERE/claude-login.sh" "$INSTALL_DIR/claude-login.sh" \
-   && cp "$HERE/gateway.sh" "$INSTALL_DIR/gateway.sh" \
+if cp "$HERE/lib/claude-login.sh" "$INSTALL_DIR/claude-login.sh" \
+   && cp "$HERE/lib/gateway.sh" "$INSTALL_DIR/gateway.sh" \
    && mkdir -p "$INSTALL_DIR/lib" \
    && cp "$HERE/lib/common.sh" "$INSTALL_DIR/lib/common.sh"; then
   chmod +x "$INSTALL_DIR/claude-login.sh" "$INSTALL_DIR/gateway.sh"

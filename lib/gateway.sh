@@ -7,8 +7,15 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib/common.sh
-source "$HERE/lib/common.sh"
+# Locate common.sh: copied installs keep it at <install-dir>/lib/common.sh,
+# the repo keeps it as a sibling in lib/.
+if [[ -f "$HERE/lib/common.sh" ]]; then
+  # shellcheck source=lib/common.sh
+  source "$HERE/lib/common.sh"
+else
+  # shellcheck source=common.sh
+  source "$HERE/common.sh"
+fi
 
 # When copied into an install dir (by the installer), a sibling cliproxyapi/
 # wins over the ~/claude-gateway default. INSTALL_DIR env still overrides both.
