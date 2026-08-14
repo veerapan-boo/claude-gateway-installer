@@ -30,7 +30,6 @@ REPO="router-for-me/CLIProxyAPI"
 # ---------------------------------------------------------------------------
 INSTALL_DIR="${INSTALL_DIR:-$HOME/claude-gateway}"
 GATEWAY_HOSTNAME="${GATEWAY_HOSTNAME:-}"
-CLAUDE_EMAIL="${CLAUDE_EMAIL:-}"
 CLA_VERSION="${CLA_VERSION:-}"
 PORT="${PORT:-8317}"
 
@@ -89,12 +88,12 @@ install_missing() {
   fi
   if [[ "$PKG" == "brew" ]]; then
     # macOS ships curl/openssl/tar in /usr/bin — brew is a fallback only.
-    if ! confirm "Install ${missing[*]} via Homebrew?"; then
+    if ! confirm "Install ${missing[*]} via Homebrew?" "yes"; then
       die "Install ${missing[*]} first, then re-run: brew install ${missing[*]}"
     fi
     brew install "${missing[@]}"
   else
-    if ! confirm "Install ${missing[*]} via $PKG (needs sudo)?"; then
+    if ! confirm "Install ${missing[*]} via $PKG (needs sudo)?" "yes"; then
       die "Install them first, then re-run: sudo $PKG install -y ${missing[*]}"
     fi
     case "$PKG" in
@@ -119,10 +118,11 @@ else
 fi
 
 service_running() {
+  service_names "$INSTALL_DIR"
   if [[ "$HOST_OS" == "darwin" ]]; then
-    launchctl list 2>/dev/null | grep -q "com.claude-gateway.cliproxyapi"
+    launchctl list 2>/dev/null | grep -q "$LABEL"
   else
-    command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet cliproxyapi.service 2>/dev/null
+    command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$UNIT" 2>/dev/null
   fi
 }
 port_busy() {
@@ -139,12 +139,12 @@ kill_port_owner() {
   if command -v lsof >/dev/null 2>&1; then
     pids="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null)"
   elif command -v fuser >/dev/null 2>&1; then
-    pids="$(fuser "$PORT/tcp" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$')"
+    pids="$(fuser "$PORT/tcp" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' || true)"
   fi
   [[ -z "$pids" ]] && return 1
   for pid in $pids; do
     owner="$(ps -p "$pid" -o comm= 2>/dev/null || cat "/proc/$pid/comm" 2>/dev/null || echo "pid $pid")"
-    warn "  killing $owner (pid $pid) on port $PORT"
+    ok "  freeing port $PORT (killing $owner, pid $pid)"
     kill -TERM "$pid" 2>/dev/null || sudo kill -TERM "$pid" 2>/dev/null || true
   done
   sleep 1
@@ -168,22 +168,32 @@ else
 fi
 
 if port_busy; then
-  if service_running; then
+  if service_running || port_serves_gateway_binary "$PORT"; then
     ok "port $PORT is used by the gateway service itself (already running)"
   else
     warn "port $PORT is already in use by another process:"
     if command -v lsof >/dev/null 2>&1; then
       lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print "    " $1 " (pid " $2 ")"}'
     fi
-    if confirm "Free port $PORT now (kill the process above) and continue?"; then
-      if kill_port_owner; then
-        ok "port $PORT freed"
-      else
-        die "Could not free port $PORT. Free it manually, or set PORT=<other> when re-running."
-      fi
-    else
-      die "Installation aborted. Free port $PORT (or set PORT=<other>) and re-run."
-    fi
+    while port_busy; do
+      pick __port_choice "Port $PORT is busy" 0 "Use a different port" "Free the port" "Abort"
+      case "$__port_choice" in
+        "Use a different port")
+          PORT="$(find_free_port "$(( PORT + 1 ))")"
+          ask PORT "Gateway port" "$PORT"
+          ;;
+        "Free the port")
+          if kill_port_owner; then
+            ok "port $PORT freed"
+          else
+            warn "Could not free port $PORT — pick another option."
+          fi
+          ;;
+        *)
+          die "Installation aborted. Free port $PORT (or set PORT=<other>) and re-run."
+          ;;
+      esac
+    done
   fi
 else
   ok "port $PORT is free"
@@ -215,9 +225,8 @@ step
 # ---------------------------------------------------------------------------
 say "A few questions before we start."
 ask INSTALL_DIR "Install directory" "$INSTALL_DIR"
-ask GATEWAY_HOSTNAME "Gateway hostname (e.g. claude-gateway.example.com)"
-ask CLAUDE_EMAIL "Claude account used for the subscription login"
 [[ -n "$CLA_VERSION" ]] || CLA_VERSION="$CLA_VERSION_DEFAULT"
+say "The public URL is decided later in Step 5, after you pick the tunnel."
 step
 
 mkdir -p "$INSTALL_DIR"
@@ -233,14 +242,15 @@ say "Step 2/6 — Downloading CLIProxyAPI (${CLA_VERSION}, ${HOST_OS}/${HOST_ARC
 
 resolve_latest_version() {
   local loc
-  loc="$(curl -fsSI "https://github.com/$REPO/releases/latest" | grep -i '^location:' | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  loc="$(curl -fsSI "https://github.com/$REPO/releases/latest" | grep -i '^location:' | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
   [[ -n "$loc" ]] && echo "$loc" || echo "$CLA_VERSION_DEFAULT"
 }
 
 BIN_PATH="$CPROXY_DIR/cli-proxy-api"
 if [[ -x "$BIN_PATH" ]]; then
-  warn "cli-proxy-api already present at $BIN_PATH — reusing it."
-  ok "existing binary: $("$BIN_PATH" --version 2>&1 | grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo 'unknown')"
+  ok "cli-proxy-api already present at $BIN_PATH — reusing it."
+  ver="$("$BIN_PATH" --version 2>&1 | grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+  ok "existing binary: ${ver:-unknown}"
 else
   if [[ "$CLA_VERSION" == "latest" ]]; then
     CLA_VERSION="$(resolve_latest_version)"
@@ -255,7 +265,8 @@ else
   tar -xzf "$TMP/$ASSET" -C "$CPROXY_DIR" cli-proxy-api
   chmod +x "$BIN_PATH"
   rm -rf "$TMP"
-  ok "installed: $("$BIN_PATH" --version 2>&1 | grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo 'CLIProxyAPI')"
+  ver="$("$BIN_PATH" --version 2>&1 | grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+  ok "installed: ${ver:-CLIProxyAPI}"
 fi
 step
 
@@ -269,7 +280,7 @@ chmod 700 "$SECRETS_DIR" "$CPROXY_DIR/auth"
 
 # Reuse existing keys if present (idempotent re-runs)
 if [[ -f "$SECRETS_DIR/keys.txt" ]]; then
-  warn "Existing keys found in $SECRETS_DIR/keys.txt — keeping them."
+  ok "Existing keys found in $SECRETS_DIR/keys.txt — keeping them."
 else
   say "Device names, comma-separated (e.g. laptop,work-desktop,macbook):"
   devices=""
@@ -294,7 +305,7 @@ done < "$SECRETS_DIR/keys.txt"
 [[ ${#api_keys[@]} -gt 0 ]] || die "No valid keys found in $SECRETS_DIR/keys.txt"
 
 if [[ -f "$CONFIG_PATH" ]]; then
-  warn "config.yaml exists — leaving it untouched. Delete it to regenerate."
+  ok "config.yaml exists — leaving it untouched. Delete it to regenerate."
 else
   cat > "$CONFIG_PATH" <<YAML
 # Claude Code Gateway — CLIProxyAPI config (generated by claude-gateway-installer)
@@ -335,7 +346,19 @@ step
 # 5. Cloudflare Tunnel
 # ---------------------------------------------------------------------------
 say "Step 5/6 — Cloudflare Tunnel"
-bash "$HERE/setup-tunnel.sh" --hostname "$GATEWAY_HOSTNAME" --port "$PORT" || die "Tunnel setup failed."
+HOSTNAME_OUT="$(mktemp)"
+bash "$HERE/setup-tunnel.sh" --hostname "$GATEWAY_HOSTNAME" --port "$PORT" --hostname-out "$HOSTNAME_OUT" || {
+  rm -f "$HOSTNAME_OUT"
+  die "Tunnel setup failed."
+}
+GATEWAY_HOSTNAME="$(cat "$HOSTNAME_OUT" 2>/dev/null || true)"
+rm -f "$HOSTNAME_OUT"
+[[ -n "$GATEWAY_HOSTNAME" ]] || GATEWAY_HOSTNAME="localhost"
+# Persist the public URL so `gateway.sh uninstall` can offer to remove the
+# tunnel ingress rule for this instance later.
+if [[ "$GATEWAY_HOSTNAME" != "localhost" && "$GATEWAY_HOSTNAME" == *.* ]]; then
+  printf '%s\n' "$GATEWAY_HOSTNAME" > "$INSTALL_DIR/hostname.txt" 2>/dev/null || true
+fi
 step
 
 # ---------------------------------------------------------------------------
@@ -357,15 +380,33 @@ else
   warn "local health check returned HTTP $local_status — check the service logs."
 fi
 
-public_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "x-api-key: $FIRST_KEY" "https://$GATEWAY_HOSTNAME/v1/models" || echo 000)"
-if [[ "$public_status" == "200" ]]; then
+public_rc=0
+public_code="$(curl -sS -o /dev/null -w '%{http_code}' -H "x-api-key: $FIRST_KEY" "https://$GATEWAY_HOSTNAME/v1/models" 2>/dev/null)" || public_rc=$?
+[[ -z "$public_code" ]] && public_code="000"
+if [[ "$public_code" == "200" ]]; then
   ok "public health check: HTTP 200 on https://$GATEWAY_HOSTNAME"
+elif [[ "$public_rc" == "6" ]]; then
+  echo
+  say "Next step — make the public URL live:"
+  say "  https://$GATEWAY_HOSTNAME is not reachable yet (DNS not resolving) —"
+  say "  expected until you add the public hostname to your Cloudflare tunnel."
+  say "  Then verify with:  curl -H \"x-api-key: $FIRST_KEY\" https://$GATEWAY_HOSTNAME/v1/models"
+  echo
 else
-  warn "public health check returned HTTP $public_status — the tunnel/ingress may still be propagating."
+  warn "public health check returned HTTP $public_code — the tunnel/ingress may still be propagating."
 fi
 
 echo
 step
+if cp "$HERE/claude-login.sh" "$INSTALL_DIR/claude-login.sh" \
+   && cp "$HERE/gateway.sh" "$INSTALL_DIR/gateway.sh" \
+   && mkdir -p "$INSTALL_DIR/lib" \
+   && cp "$HERE/lib/common.sh" "$INSTALL_DIR/lib/common.sh"; then
+  chmod +x "$INSTALL_DIR/claude-login.sh" "$INSTALL_DIR/gateway.sh"
+  ok "management scripts copied to $INSTALL_DIR/"
+else
+  warn "could not copy management scripts into $INSTALL_DIR/ — keep using $HERE/."
+fi
 cat <<EOF
 ${CC_BOLD}Installation complete!${CC_RESET}
 
@@ -390,5 +431,5 @@ while IFS= read -r line; do
 done < "$SECRETS_DIR/keys.txt"
 echo "  Add the three lines to ~/.zshrc (or ~/.bashrc), then: source ~/.zshrc && claude"
 step
-say "Management: $HERE/gateway.sh status|start|stop|restart|logs"
-say "Re-login when the OAuth refresh token expires (~60-90 days): $HERE/claude-login.sh"
+say "Management: $INSTALL_DIR/gateway.sh status|start|stop|restart|logs"
+say "Re-login when the OAuth refresh token expires (~60-90 days): $INSTALL_DIR/claude-login.sh"

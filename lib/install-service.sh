@@ -17,6 +17,7 @@ INSTALL_DIR="${1:-$HOME/claude-gateway}"
 SERVICE_USER="${2:-$(id -un)}"
 
 detect_os
+service_names "$INSTALL_DIR"
 BIN="$INSTALL_DIR/cliproxyapi/cli-proxy-api"
 CONFIG="$INSTALL_DIR/cliproxyapi/config.yaml"
 [[ -x "$BIN" ]]  || die "Gateway binary not found: $BIN"
@@ -25,11 +26,32 @@ CONFIG="$INSTALL_DIR/cliproxyapi/config.yaml"
 PORT="$(grep -E '^port:' "$CONFIG" | awk '{print $2}' | tr -d '"' || true)"
 PORT="${PORT:-8317}"
 
+# Retire a legacy single-instance service that points at this same install dir
+# (e.g. one installed before per-instance service names existed).
+if [[ "$HOST_OS" == "darwin" ]]; then
+  LEGACY_PLIST="$HOME/Library/LaunchAgents/com.claude-gateway.cliproxyapi.plist"
+  if [[ -f "$LEGACY_PLIST" && "$LABEL" != "com.claude-gateway.cliproxyapi" ]] \
+     && grep -q "$INSTALL_DIR/cliproxyapi" "$LEGACY_PLIST" 2>/dev/null; then
+    launchctl bootout "gui/$(id -u)" "$LEGACY_PLIST" 2>/dev/null || true
+    rm -f "$LEGACY_PLIST"
+    ok "retired legacy LaunchAgent for this install dir."
+  fi
+else
+  LEGACY_UNIT="/etc/systemd/system/cliproxyapi.service"
+  if [[ -f "$LEGACY_UNIT" && "$UNIT" != "cliproxyapi.service" ]] \
+     && grep -q "$INSTALL_DIR/cliproxyapi" "$LEGACY_UNIT" 2>/dev/null; then
+    sudo systemctl disable --now cliproxyapi.service 2>/dev/null || true
+    sudo rm -f "$LEGACY_UNIT"
+    sudo systemctl daemon-reload 2>/dev/null || true
+    ok "retired legacy systemd unit for this install dir."
+  fi
+fi
+
 is_running() {
   if [[ "$HOST_OS" == "darwin" ]]; then
-    launchctl list 2>/dev/null | grep -q "com.claude-gateway.cliproxyapi"
+    launchctl list 2>/dev/null | grep -q "$LABEL"
   else
-    systemctl is-active --quiet cliproxyapi.service 2>/dev/null
+    systemctl is-active --quiet "$UNIT" 2>/dev/null
   fi
 }
 
@@ -46,7 +68,7 @@ start_now() {
     launchctl load -w "$1" 2>/dev/null || launchctl bootstrap "gui/$(id -u)" "$1"
   else
     sudo systemctl daemon-reload
-    sudo systemctl enable --now cliproxyapi.service
+    sudo systemctl enable --now "$UNIT"
   fi
 }
 
@@ -57,17 +79,20 @@ if is_running; then
 fi
 
 if port_busy; then
+  if port_serves_gateway_binary "$PORT"; then
+    ok "gateway is already running on port $PORT — leaving it as-is."
+    exit 0
+  fi
   die "Port $PORT is already in use by another process. Free it first, or change 'port:' in $CONFIG."
 fi
 
 if [[ "$HOST_OS" == "darwin" ]]; then
-  PLIST="$HOME/Library/LaunchAgents/com.claude-gateway.cliproxyapi.plist"
   cat > "$PLIST" <<XML
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.claude-gateway.cliproxyapi</string>
+  <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
     <string>$BIN</string>
@@ -87,10 +112,10 @@ XML
   ok "LaunchAgent installed and loaded."
 
 else
-  UNIT="/etc/systemd/system/cliproxyapi.service"
-  say "Installing systemd unit $UNIT …"
+  UNIT_FILE="/etc/systemd/system/$UNIT"
+  say "Installing systemd unit $UNIT_FILE …"
   if [[ "$(id -u)" == "0" ]]; then
-    cat > "$UNIT" <<INI
+    cat > "$UNIT_FILE" <<INI
 [Unit]
 Description=Claude Code Gateway (CLIProxyAPI)
 After=network-online.target
@@ -109,9 +134,9 @@ RestartSec=5
 WantedBy=multi-user.target
 INI
     systemctl daemon-reload
-    systemctl enable --now cliproxyapi.service
+    systemctl enable --now "$UNIT"
   else
-    tee "$UNIT" >/dev/null <<INI
+    tee "$UNIT_FILE" >/dev/null <<INI
 [Unit]
 Description=Claude Code Gateway (CLIProxyAPI)
 After=network-online.target
@@ -130,7 +155,7 @@ RestartSec=5
 WantedBy=multi-user.target
 INI
     sudo systemctl daemon-reload
-    sudo systemctl enable --now cliproxyapi.service
+    sudo systemctl enable --now "$UNIT"
   fi
   ok "systemd unit installed and started."
 fi
@@ -142,5 +167,5 @@ if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
   ok "gateway is listening on 127.0.0.1:$PORT"
 else
   warn "gateway does not appear to be listening yet — check logs with:"
-  warn "  $HERE/gateway.sh logs"
+  warn "  $INSTALL_DIR/gateway.sh logs"
 fi

@@ -27,11 +27,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -z "$CONFIG" ]] && CONFIG="$HOME/claude-gateway/cliproxyapi/config.yaml"
+if [[ -z "$CONFIG" ]]; then
+  # Auto-detect: when copied into an install dir (by the installer), a sibling
+  # cliproxyapi/config.yaml wins over the ~/claude-gateway default.
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -f "$SCRIPT_DIR/cliproxyapi/config.yaml" ]]; then
+    CONFIG="$SCRIPT_DIR/cliproxyapi/config.yaml"
+  else
+    CONFIG="$HOME/claude-gateway/cliproxyapi/config.yaml"
+  fi
+fi
 [[ -f "$CONFIG" ]] || die "Config not found: $CONFIG"
 
 CPROXY_DIR="$(dirname "$CONFIG")"
-AUTH_DIR="$(grep -E '^auth-dir:' "$CONFIG" | awk '{print $2}' | tr -d '"' | sed "s|^~|$HOME|")"
+AUTH_DIR="$(grep -E '^auth-dir:' "$CONFIG" | awk '{print $2}' | tr -d '"' | sed "s|^~|$HOME|" || true)"
 [[ -z "$AUTH_DIR" ]] && AUTH_DIR="$CPROXY_DIR/auth"
 AUTH_DIR="${AUTH_DIR%/}"
 BIN="$CPROXY_DIR/cli-proxy-api"
@@ -86,12 +95,15 @@ say "Step 1 — open this URL in ANY browser and sign in with your Claude subscr
 echo
 echo "${CC_BOLD}  $URL${CC_RESET}"
 echo
-say "Step 2 — click Authorize. The browser redirects to"
-echo "          ${CC_BOLD}http://localhost:54545/callback?code=...${CC_RESET}"
+say "Step 2 — click Authorize. The browser redirects to a localhost URL"
 echo "        (the page fails to load — that is expected)."
 echo
 say "Step 3 — copy the FULL callback URL from the address bar and paste it"
-say "         below (5-minute timeout):"
+say "         below (5-minute timeout)."
+echo
+echo "        ${CC_DIM}It must include BOTH code and state — e.g.:${CC_RESET}"
+echo "          ${CC_BOLD}http://localhost:54545/callback?code=xxxxx&state=yyyyy${CC_RESET}"
+echo "        ${CC_DIM}or just the parameters:${CC_RESET}   ${CC_BOLD}code=xxxxx&state=yyyyy${CC_RESET}"
 echo
 
 # ---------------------------------------------------------------------------
@@ -103,7 +115,21 @@ is_done() {
   return 1
 }
 
+# validate_callback <input> → 0 ok / 1 invalid / 2 missing-state
+validate_callback() {
+  local input=$1
+  if [[ "$input" == *error=* ]] || [[ "$input" == *error_description=* ]]; then
+    return 0
+  fi
+  if [[ "$input" != *code=* ]]; then
+    return 1
+  fi
+  [[ "$input" == *state=* ]] && return 0
+  return 2
+}
+
 deadline=$(( $(date +%s) + 330 ))
+sent=0
 while (( $(date +%s) < deadline )); do
   if is_done; then break; fi
   if ! kill -0 "$LOGIN_PID" 2>/dev/null; then
@@ -114,12 +140,32 @@ while (( $(date +%s) < deadline )); do
     cat "$LOG"
     exit 1
   fi
+  if (( sent )); then
+    # Callback already sent — just poll while the gateway exchanges the code.
+    sleep 2
+    continue
+  fi
   if [[ -t 0 ]]; then
     cb=""
-    IFS= read -r -t 30 -p "  > paste callback URL here: " cb || true
+    if ! IFS= read -r -t 30 -p "  > paste the FULL callback URL here: " cb; then
+      echo   # read timed out — move to a fresh line before re-prompting
+      continue
+    fi
     if [[ -n "$cb" ]]; then
-      printf '%s\n' "$cb" >&3
-      ok "sent callback — completing authentication…"
+      validate_callback "$cb"
+      case "$?" in
+        0)
+          printf '%s\n' "$cb" >&3
+          sent=1
+          ok "callback sent — completing authentication…"
+          ;;
+        2)
+          warn "state is missing — paste the FULL URL from the address bar (it contains &state=...)."
+          ;;
+        *)
+          warn "that does not look like a callback URL — paste the full http://localhost:54545/callback?code=...&state=... URL."
+          ;;
+      esac
     fi
   else
     # Not an interactive terminal (e.g. called from install.sh); just poll.
@@ -129,6 +175,8 @@ done
 
 if ! is_done; then
   fail "Login timed out (5 minutes). The authorize URL has expired."
+  echo
+  cat "$LOG"
   echo "Re-run: $0 --config '$CONFIG' for a fresh challenge."
   exit 1
 fi
