@@ -122,19 +122,6 @@ is_done() {
   return 1
 }
 
-# validate_callback <input> → 0 ok / 1 invalid / 2 missing-state
-validate_callback() {
-  local input=$1
-  if [[ "$input" == *error=* ]] || [[ "$input" == *error_description=* ]]; then
-    return 0
-  fi
-  if [[ "$input" != *code=* ]]; then
-    return 1
-  fi
-  [[ "$input" == *state=* ]] && return 0
-  return 2
-}
-
 deadline=$(( $(date +%s) + 330 ))
 sent=0
 while (( $(date +%s) < deadline )); do

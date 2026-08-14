@@ -215,21 +215,41 @@ service_names() {
 # ---------------------------------------------------------------------------
 # Cloudflare tunnel config helpers (used by setup-tunnel.sh and gateway.sh)
 # ---------------------------------------------------------------------------
+# ingress_insert <host> <port> — pure transform: reads a cloudflared config.yml
+# on stdin, prints it on stdout with "host -> http://localhost:port" inserted
+# as the FIRST ingress rule (right after the "ingress:" line).
+ingress_insert() {
+  local host=$1 port=$2
+  awk -v h="$host" -v p="$port" '
+    /^ingress:/ { print; print "  - hostname: " h; print "    service: http://localhost:" p; next }
+    { print }
+  '
+}
+
+# ingress_remove <host> — pure transform: reads a cloudflared config.yml on
+# stdin, prints it on stdout with that hostname's rule (hostname line + its
+# following "service:" line) removed.
+ingress_remove() {
+  local host=$1
+  awk -v h="$host" '
+    /^  - hostname: / { if ($3 == h) { del=1; next } }
+    /^    service: /  { if (del) { del=0; next } }
+    { print }
+  '
+}
+
 # add_ingress_rule <conf> <host> <port> — inserts "host -> http://localhost:port"
-# as the FIRST ingress rule (right after the "ingress:" line) and restarts
-# cloudflared. Runs under sudo — you type the password.
+# into a config-file-managed tunnel and restarts cloudflared. The awk transform
+# is pure (ingress_insert); only the write + restart run under sudo.
 add_ingress_rule() {
   local conf=$1 host=$2 port=$3 tid
-  if sudo grep -q "hostname: $host" "$conf" 2>/dev/null; then
+  if grep -q "hostname: $host" "$conf" 2>/dev/null; then
     ok "hostname $host is already in $conf — nothing to add."
     return 0
   fi
   say "Adding the public hostname to $conf (sudo — type your password when asked):"
   local tmp="$HOME/.claude-gateway/config.yml.new"
-  sudo awk -v h="$host" -v p="$port" '
-    /^ingress:/ { print; print "  - hostname: " h; print "    service: http://localhost:" p; next }
-    { print }
-  ' "$conf" > "$tmp" && sudo mv "$tmp" "$conf"
+  ingress_insert "$host" "$port" < "$conf" > "$tmp" && sudo mv "$tmp" "$conf"
   ok "added  $host → http://localhost:$port"
   restart_cloudflared
   tid="$(grep -E '^tunnel:' "$conf" 2>/dev/null | awk '{print $2}' | head -1 || true)"
@@ -240,22 +260,18 @@ add_ingress_rule() {
 }
 
 # remove_ingress_rule <conf> <host> — removes that hostname's ingress rule
-# (and its following "service:" line) from a cloudflared config.yml, then
-# restarts cloudflared so it disappears from the dashboard too.
-# Runs under sudo — you type the password.
+# from a config-file-managed tunnel and restarts cloudflared so it disappears
+# from the dashboard too. The awk transform is pure (ingress_remove); only the
+# write + restart run under sudo.
 remove_ingress_rule() {
   local conf=$1 host=$2
-  if ! sudo grep -q "hostname: $host" "$conf" 2>/dev/null; then
+  if ! grep -q "hostname: $host" "$conf" 2>/dev/null; then
     say "hostname $host is not in $conf — nothing to remove."
     return 0
   fi
   say "Removing $host from $conf (sudo — type your password when asked):"
   local tmp="$HOME/.claude-gateway/config.yml.new"
-  sudo awk -v h="$host" '
-    /^  - hostname: / { if ($3 == h) { del=1; next } }
-    /^    service: /  { if (del) { del=0; next } }
-    { print }
-  ' "$conf" > "$tmp" && sudo mv "$tmp" "$conf"
+  ingress_remove "$host" < "$conf" > "$tmp" && sudo mv "$tmp" "$conf"
   ok "removed  $host from the tunnel config"
   restart_cloudflared
 }
@@ -270,4 +286,18 @@ restart_cloudflared() {
     sudo systemctl restart cloudflared 2>/dev/null && ok "cloudflared restarted." \
       || warn "restart cloudflared manually to apply the change."
   fi
+}
+
+# validate_callback <input> → 0 ok / 1 invalid / 2 missing-state
+#   The gateway requires BOTH code and state in the pasted callback.
+validate_callback() {
+  local input=$1
+  if [[ "$input" == *error=* ]] || [[ "$input" == *error_description=* ]]; then
+    return 0
+  fi
+  if [[ "$input" != *code=* ]]; then
+    return 1
+  fi
+  [[ "$input" == *state=* ]] && return 0
+  return 2
 }

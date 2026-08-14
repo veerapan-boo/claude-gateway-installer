@@ -184,6 +184,19 @@ Then verify on a client device: `claude` should work again.
 - If `claude-gateway.example.com` returns `401`, the gateway is fine — the OAuth
   token expired. Follow the [Re-login](#re-login) section above.
 
+## Tests
+
+The pure logic in `lib/common.sh` (service naming, paste-back callback
+validation, the cloudflared ingress add/remove transforms) has a small
+zero-dependency test harness — no framework to install:
+
+```bash
+bash tests/run.sh
+```
+
+The tests `source` `lib/common.sh` and assert on function output only — no
+`sudo`, no network, no real install. If you refactor a helper, run this.
+
 ## Files
 
 ```
@@ -195,6 +208,8 @@ claude-gateway-installer/
 │   ├── gateway.sh          # status | start | stop | restart | logs | uninstall | list — copied to install dir
 │   ├── common.sh           # shared helpers (OS/arch detection, prompts) — copied to install dir
 │   └── install-service.sh  # systemd / LaunchAgent service install
+├── tests/
+│   └── run.sh              # zero-dependency unit tests (bash tests/run.sh)
 └── docs/th/installer.md    # Thai version of this README
 ```
 
