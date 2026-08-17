@@ -188,6 +188,31 @@ find_free_port() {
 # ---------------------------------------------------------------------------
 # Service identity (per install dir) — lets several gateways run side by side.
 # ---------------------------------------------------------------------------
+# Privilege helpers
+# ---------------------------------------------------------------------------
+# run_root <cmd...> — run cmd as root: directly when already root, via sudo
+# otherwise. Use this for every write under /etc and every systemctl call.
+#
+# NOTE for writes: a plain `run_root cmd > /root-owned/file` still fails, because
+# the redirect is opened by the *calling* (unprivileged) shell. Pipe through tee
+# instead:  run_root tee /root-owned/file >/dev/null <<EOF ... EOF
+run_root() {
+  if [[ "$(id -u)" == "0" ]]; then "$@"; else sudo "$@"; fi
+}
+
+# require_root_ability — die with a clear message if this shell can neither act
+# as root nor escalate. Called before any step that must write under /etc.
+require_root_ability() {
+  local __what=${1:-"This step"}
+  if [[ "$(id -u)" != "0" ]] && ! command -v sudo >/dev/null 2>&1; then
+    die "$__what needs root, but 'sudo' was not found. Re-run as root instead."
+  fi
+  # Explicit: without it the function returns the failed [[ ]] status (1), which
+  # under `set -e` would abort the caller on the perfectly fine root path.
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # service_slug <install-dir> → safe lowercase id derived from the dir name.
 service_slug() {
   local __base

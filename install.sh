@@ -53,9 +53,6 @@ say "Step 1/6 — Checking your machine (no downloads yet)"
 ok "OS / arch: ${HOST_OS} / ${HOST_ARCH}"
 
 # --- base tools (curl / openssl / tar) — auto-install if missing -----------
-run_root() {
-  if [[ "$(id -u)" == "0" ]]; then "$@"; else sudo "$@"; fi
-}
 detect_pkg() {
   PKG=""
   if [[ "$HOST_OS" == "darwin" ]]; then

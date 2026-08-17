@@ -26,6 +26,14 @@ CONFIG="$INSTALL_DIR/cliproxyapi/config.yaml"
 PORT="$(grep -E '^port:' "$CONFIG" | awk '{print $2}' | tr -d '"' || true)"
 PORT="${PORT:-8317}"
 
+# run_root / require_root_ability come from common.sh. Fail early with a clear
+# message instead of a bare "Permission denied" halfway through the install.
+[[ "$HOST_OS" == "darwin" ]] || require_root_ability "Installing the systemd unit"
+
+# Real installs always write to /etc/systemd/system; the override exists so the
+# test suite can point the write at a sandbox dir.
+SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+
 # Retire a legacy single-instance service that points at this same install dir
 # (e.g. one installed before per-instance service names existed).
 if [[ "$HOST_OS" == "darwin" ]]; then
@@ -37,12 +45,12 @@ if [[ "$HOST_OS" == "darwin" ]]; then
     ok "retired legacy LaunchAgent for this install dir."
   fi
 else
-  LEGACY_UNIT="/etc/systemd/system/cliproxyapi.service"
+  LEGACY_UNIT="$SYSTEMD_UNIT_DIR/cliproxyapi.service"
   if [[ -f "$LEGACY_UNIT" && "$UNIT" != "cliproxyapi.service" ]] \
      && grep -q "$INSTALL_DIR/cliproxyapi" "$LEGACY_UNIT" 2>/dev/null; then
-    sudo systemctl disable --now cliproxyapi.service 2>/dev/null || true
-    sudo rm -f "$LEGACY_UNIT"
-    sudo systemctl daemon-reload 2>/dev/null || true
+    run_root systemctl disable --now cliproxyapi.service 2>/dev/null || true
+    run_root rm -f "$LEGACY_UNIT"
+    run_root systemctl daemon-reload 2>/dev/null || true
     ok "retired legacy systemd unit for this install dir."
   fi
 fi
@@ -67,8 +75,8 @@ start_now() {
   if [[ "$HOST_OS" == "darwin" ]]; then
     launchctl load -w "$1" 2>/dev/null || launchctl bootstrap "gui/$(id -u)" "$1"
   else
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now "$UNIT"
+    run_root systemctl daemon-reload
+    run_root systemctl enable --now "$UNIT"
   fi
 }
 
@@ -87,6 +95,7 @@ if port_busy; then
 fi
 
 if [[ "$HOST_OS" == "darwin" ]]; then
+  mkdir -p "$(dirname "$PLIST")"   # absent on a freshly-created macOS account
   cat > "$PLIST" <<XML
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -112,10 +121,12 @@ XML
   ok "LaunchAgent installed and loaded."
 
 else
-  UNIT_FILE="/etc/systemd/system/$UNIT"
-  say "Installing systemd unit $UNIT_FILE …"
-  if [[ "$(id -u)" == "0" ]]; then
-    cat > "$UNIT_FILE" <<INI
+  UNIT_FILE="$SYSTEMD_UNIT_DIR/$UNIT"
+  say "Installing systemd unit $UNIT_FILE (sudo — type your password when asked) …"
+  # /etc/systemd/system is root-owned, so the write itself must run as root —
+  # a plain redirect would be opened by the *calling* shell and fail with
+  # "Permission denied". `run_root tee` opens the file as root instead.
+  run_root tee "$UNIT_FILE" >/dev/null <<INI
 [Unit]
 Description=Claude Code Gateway (CLIProxyAPI)
 After=network-online.target
@@ -133,30 +144,8 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 INI
-    systemctl daemon-reload
-    systemctl enable --now "$UNIT"
-  else
-    tee "$UNIT_FILE" >/dev/null <<INI
-[Unit]
-Description=Claude Code Gateway (CLIProxyAPI)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$SERVICE_USER
-Group=$SERVICE_USER
-WorkingDirectory=$(dirname "$CONFIG")
-ExecStart=$BIN --config $CONFIG
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-INI
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now "$UNIT"
-  fi
+  run_root systemctl daemon-reload
+  run_root systemctl enable --now "$UNIT"
   ok "systemd unit installed and started."
 fi
 
