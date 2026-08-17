@@ -16,9 +16,9 @@ HOST_OS="${HOST_OS:-$(uname -s | tr '[:upper:]' '[:lower:]')}"
 PASS=0
 FAIL=0
 
-# t <name> <expected> <actual>
+# t <name> <actual> <expected>  — computed value first, matching every call site
 t() {
-  local name=$1 expected=$2 actual=$3
+  local name=$1 actual=$2 expected=$3
   if [[ "$expected" == "$actual" ]]; then
     PASS=$((PASS + 1))
     printf '  ok  %s\n' "$name"
@@ -105,6 +105,127 @@ if [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1024 && PORT <= 65535 )); then
 else
   FAIL=$((FAIL + 1)); printf '  FAIL find_free_port out of range: %s\n' "$PORT"
 fi
+
+# ---------------------------------------------------------------------------
+# Privilege helpers + the Step 6/6 systemd unit install.
+#
+# Regression guarded here: the unit file used to be written with a bare `tee`,
+# which fails with "tee: /etc/systemd/system/cliproxyapi.service: Permission
+# denied" for every non-root user. /etc/systemd/system is stood in for by a
+# 0555 sandbox dir — unwritable by the test user, writable only by the sudo
+# stub — so an unprivileged write cannot pass these tests.
+# ---------------------------------------------------------------------------
+TESTTMP="$(mktemp -d "${TMPDIR:-/tmp}/cgw-tests.XXXXXX")"
+cleanup() { chmod -R u+w "$TESTTMP" 2>/dev/null || true; rm -rf "$TESTTMP"; }
+trap cleanup EXIT
+
+STUBS="$TESTTMP/stubs"; mkdir -p "$STUBS"
+export SUDO_LOG="$TESTTMP/sudo.log"
+export SYSTEMCTL_LOG="$TESTTMP/systemctl.log"
+
+cat > "$STUBS/sudo" <<'STUB'
+#!/usr/bin/env bash
+# Records the call, then stands in for root by unlocking the sandbox unit dir
+# for the duration of the command.
+printf 'sudo %s\n' "$*" >> "$SUDO_LOG"
+[[ -d "${SYSTEMD_UNIT_DIR:-}" ]] && chmod u+w "$SYSTEMD_UNIT_DIR"
+"$@"; rc=$?
+[[ -d "${SYSTEMD_UNIT_DIR:-}" ]] && chmod a-w "$SYSTEMD_UNIT_DIR"
+exit $rc
+STUB
+cat > "$STUBS/uname" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}" in -m) echo x86_64 ;; *) echo Linux ;; esac
+STUB
+cat > "$STUBS/systemctl" <<'STUB'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >> "$SYSTEMCTL_LOG"
+[[ "${1:-}" == "is-active" ]] && exit 3   # nothing running yet
+exit 0
+STUB
+printf '#!/usr/bin/env bash\nexit 0\n' > "$STUBS/ss"     # no listener on any port
+printf '#!/usr/bin/env bash\nexit 0\n' > "$STUBS/sleep"  # skip the 3s settle wait
+chmod +x "$STUBS"/*
+
+# These two run under PATHs that deliberately exclude the real /usr/bin (to
+# make `sudo` unreachable), so they use an absolute /bin/sh shebang — an
+# `env bash` shebang would not resolve there.
+ROOTSTUB="$TESTTMP/rootstub"; mkdir -p "$ROOTSTUB"
+cat > "$ROOTSTUB/id" <<'STUB'
+#!/bin/sh
+case "${1:-}" in -u) echo 0 ;; *) echo root ;; esac
+STUB
+NOSUDO="$TESTTMP/nosudo"; mkdir -p "$NOSUDO"
+cat > "$NOSUDO/id" <<'STUB'
+#!/bin/sh
+case "${1:-}" in -u) echo 1000 ;; *) echo tester ;; esac
+STUB
+chmod +x "$ROOTSTUB/id" "$NOSUDO/id"
+
+section 'run_root — privilege dispatch'
+: > "$SUDO_LOG"
+OUT=$( PATH="$STUBS:$PATH"; run_root echo hello )
+t "non-root: command still runs"    "$OUT" "hello"
+t "non-root: escalates via sudo"    "$(grep -cFx 'sudo echo hello' "$SUDO_LOG")" "1"
+: > "$SUDO_LOG"
+OUT=$( PATH="$ROOTSTUB:$STUBS:$PATH"; run_root echo hello )
+t "root: command still runs"        "$OUT" "hello"
+t "root: does not shell out to sudo" "$(wc -l < "$SUDO_LOG" | tr -d ' ')" "0"
+
+section 'require_root_ability — fails early, not mid-install'
+( PATH="$NOSUDO"; require_root_ability "Test step" ) >/dev/null 2>&1; RC=$?
+t "non-root with no sudo → dies"    "$RC" "1"
+( PATH="$STUBS:$PATH"; require_root_ability "Test step" ) >/dev/null 2>&1; RC=$?
+t "non-root with sudo → proceeds"   "$RC" "0"
+# Must return 0, not the failed [[ ]] status — under `set -e` a stray 1 here
+# would abort the installer on the root path, where nothing is actually wrong.
+( PATH="$ROOTSTUB:$NOSUDO"; require_root_ability "Test step" ) >/dev/null 2>&1; RC=$?
+t "root with no sudo → proceeds"    "$RC" "0"
+
+section 'install-service.sh — systemd unit written with root privileges'
+GWDIR="$TESTTMP/gw"; mkdir -p "$GWDIR/cliproxyapi"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$GWDIR/cliproxyapi/cli-proxy-api"
+chmod +x "$GWDIR/cliproxyapi/cli-proxy-api"
+printf 'port: 18317\n' > "$GWDIR/cliproxyapi/config.yaml"
+
+export SYSTEMD_UNIT_DIR="$TESTTMP/systemd"; mkdir -p "$SYSTEMD_UNIT_DIR"
+: > "$SUDO_LOG"; : > "$SYSTEMCTL_LOG"
+chmod 0555 "$SYSTEMD_UNIT_DIR"   # stand-in for root-owned /etc/systemd/system
+( PATH="$STUBS:$PATH"; bash "$ROOT/lib/install-service.sh" "$GWDIR" testuser ) \
+  > "$TESTTMP/install.log" 2>&1
+RC=$?
+
+# Prove the sandbox was genuinely unwritable — otherwise the assertions below
+# would also pass with the old, unprivileged `tee`.
+if [[ "$(id -u)" == "0" ]]; then
+  printf '  skip running as root — cannot prove an unprivileged write fails\n'
+else
+  ( echo probe > "$SYSTEMD_UNIT_DIR/probe" ) 2>/dev/null
+  t "sandbox blocks unprivileged writes" \
+    "$([[ -f "$SYSTEMD_UNIT_DIR/probe" ]] && echo wrote || echo blocked)" "blocked"
+fi
+chmod 0755 "$SYSTEMD_UNIT_DIR"
+
+UNIT_FILE="$SYSTEMD_UNIT_DIR/cliproxyapi-gw.service"
+t "script exits 0"            "$RC" "0"
+t "unit file created"         "$([[ -f "$UNIT_FILE" ]] && echo yes || echo no)" "yes"
+t "no 'Permission denied'"    "$(grep -ci 'permission denied' "$TESTTMP/install.log")" "0"
+t "write escalated via sudo"  "$(grep -cFx "sudo tee $UNIT_FILE" "$SUDO_LOG")" "1"
+t "ExecStart wired to binary" \
+  "$(grep -cFx "ExecStart=$GWDIR/cliproxyapi/cli-proxy-api --config $GWDIR/cliproxyapi/config.yaml" "$UNIT_FILE")" "1"
+t "runs as the given user"    "$(grep -cFx 'User=testuser' "$UNIT_FILE")" "1"
+t "daemon-reload ran"         "$(grep -cFx 'systemctl daemon-reload' "$SYSTEMCTL_LOG")" "1"
+t "unit enabled and started"  "$(grep -cFx 'systemctl enable --now cliproxyapi-gw.service' "$SYSTEMCTL_LOG")" "1"
+
+section 'install-service.sh — same run as root, without sudo on PATH'
+rm -f "$UNIT_FILE"
+: > "$SUDO_LOG"; : > "$SYSTEMCTL_LOG"
+( PATH="$ROOTSTUB:$STUBS:$PATH"; bash "$ROOT/lib/install-service.sh" "$GWDIR" testuser ) \
+  > "$TESTTMP/install-root.log" 2>&1
+RC=$?
+t "script exits 0 as root"    "$RC" "0"
+t "unit file created as root" "$([[ -f "$UNIT_FILE" ]] && echo yes || echo no)" "yes"
+t "root path skips sudo"      "$(wc -l < "$SUDO_LOG" | tr -d ' ')" "0"
 
 printf '\n----------------------------------------\n'
 printf '  %d passed, %d failed\n' "$PASS" "$FAIL"
