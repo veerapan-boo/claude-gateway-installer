@@ -148,12 +148,15 @@ OAuth token ที่ gateway ใช้จะหมดอายุประม�
 ```
 claude-gateway-installer/
 ├── install.sh              # ตัวติดตั้งแบบ interactive (ไฟล์เดียวที่ต้องรัน)
-└── lib/
-    ├── setup-tunnel.sh     # ตรวจ + ตั้ง Cloudflare Tunnel (รันโดย install.sh)
-    ├── claude-login.sh     # Claude OAuth login (CLI paste-back) — คัดลอกไป install dir
-    ├── gateway.sh          # status | start | stop | restart | logs | uninstall | list — คัดลอกไป install dir
-    ├── common.sh           # helper ร่วม (ตรวจ OS/arch, prompt) — คัดลอกไป install dir
-    └── install-service.sh  # ติดตั้ง service systemd / LaunchAgent
+├── lib/
+│   ├── setup-tunnel.sh     # ตรวจ + ตั้ง Cloudflare Tunnel (รันโดย install.sh)
+│   ├── claude-login.sh     # Claude OAuth login (CLI paste-back) — คัดลอกไป install dir
+│   ├── gateway.sh          # status | start | stop | restart | logs | uninstall | list — คัดลอกไป install dir
+│   ├── common.sh           # helper ร่วม (ตรวจ OS/arch, prompt) — คัดลอกไป install dir
+│   └── install-service.sh  # ติดตั้ง service systemd / LaunchAgent
+├── tests/
+│   └── run.sh              # unit test แบบไม่มี dependency (รันด้วย `bash tests/run.sh`)
+└── docs/th/installer.md    # ไฟล์นี้ (ฉบับภาษาไทยของ README)
 ```
 
 หลังติดตั้ง directory ที่เลือกจะมีไฟล์ที่ใช้งานจริง:
